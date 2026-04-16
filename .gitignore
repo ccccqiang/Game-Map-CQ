@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Debug files
+debug_*.png
+crash_log.txt
+log.txt
+
+# Large map images (optional - uncomment if too large)
+# big_map*.png
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+point.json
+assest/*.npz
