@@ -32,12 +32,26 @@ DEFAULT_CONFIG = {
     "SIFT_RANSAC_THRESHOLD": 8.0,
 
     "AI_REFRESH_RATE": 200,
-    "AI_CONFIDENCE_THRESHOLD": 0.3,  # 降低阈值提高首次定位成功率（原0.6太严格）
-    "AI_MIN_MATCH_COUNT": 4,         # 降低最少匹配点数（原6太难满足）
+    "AI_CONFIDENCE_THRESHOLD": 0.6,  # 降低阈值提高首次定位成功率（原0.6太严格）
+    "AI_MIN_MATCH_COUNT": 9,         # 降低最少匹配点数（原6太难满足）
     "AI_RANSAC_THRESHOLD": 5.0,      # 收紧RANSAC阈值提高精度（原8.0太松）
     "AI_SCAN_SIZE": 1600,
     "AI_SCAN_STEP": 1400,
     "AI_TRACK_RADIUS": 500,
+
+    # AI图像增强配置
+    "AI_ENABLE_CLAHE": False,          # 启用CLAHE自适应直方图均衡化
+    "AI_CLAHE_CLIP_LIMIT": 2.5,       # CLAHE对比度限制（越小越保守）
+    "AI_CLAHE_GRID_SIZE": 8,          # CLAHE网格大小
+    "AI_ENABLE_GAUSSIAN_BLUR": False,  # 启用高斯模糊降噪
+    "AI_GAUSSIAN_KERNEL_SIZE": 3,     # 高斯核大小（必须为奇数）
+    "AI_GAUSSIAN_SIGMA": 1.0,         # 高斯标准差
+    "AI_ENABLE_EDGE_ENHANCE": False,  # 启用边缘增强（实验性功能）
+
+    # 多尺度特征融合配置
+    "AI_ENABLE_MULTI_SCALE": False,    # 启用多尺度金字塔匹配
+    "AI_PYRAMID_SCALES": [1.0, 0.75, 0.5],  # 金字塔缩放比例（从大到小）
+    "AI_PYRAMID_STRATEGY": "coarse_to_fine",  # 策略：coarse_to_fine(由粗到精) / weighted(加权融合)
 
     # 采集卡配置
     "USE_CAPTURE_CARD": True,
@@ -97,6 +111,20 @@ AI_RANSAC_THRESHOLD = settings.get("AI_RANSAC_THRESHOLD")
 AI_SCAN_SIZE = settings.get("AI_SCAN_SIZE")
 AI_SCAN_STEP = settings.get("AI_SCAN_STEP")
 AI_TRACK_RADIUS = settings.get("AI_TRACK_RADIUS")
+
+# AI图像增强配置
+AI_ENABLE_CLAHE = settings.get("AI_ENABLE_CLAHE", True)
+AI_CLAHE_CLIP_LIMIT = settings.get("AI_CLAHE_CLIP_LIMIT", 2.5)
+AI_CLAHE_GRID_SIZE = settings.get("AI_CLAHE_GRID_SIZE", 8)
+AI_ENABLE_GAUSSIAN_BLUR = settings.get("AI_ENABLE_GAUSSIAN_BLUR", True)
+AI_GAUSSIAN_KERNEL_SIZE = settings.get("AI_GAUSSIAN_KERNEL_SIZE", 3)
+AI_GAUSSIAN_SIGMA = settings.get("AI_GAUSSIAN_SIGMA", 1.0)
+AI_ENABLE_EDGE_ENHANCE = settings.get("AI_ENABLE_EDGE_ENHANCE", False)
+
+# 多尺度特征融合配置
+AI_ENABLE_MULTI_SCALE = settings.get("AI_ENABLE_MULTI_SCALE", True)
+AI_PYRAMID_SCALES = settings.get("AI_PYRAMID_SCALES", [1.0, 0.75, 0.5])
+AI_PYRAMID_STRATEGY = settings.get("AI_PYRAMID_STRATEGY", "coarse_to_fine")
 
 # 采集卡配置
 USE_CAPTURE_CARD = settings.get("USE_CAPTURE_CARD", False)

@@ -1,7 +1,7 @@
 {
     "MINIMAP": {
-        "top": 30,
-        "left": 1147,
+        "top": 29,
+        "left": 1146,
         "width": 115,
         "height": 115
     },
@@ -17,7 +17,7 @@
     "SIFT_RANSAC_THRESHOLD": 8.0,
     "AI_REFRESH_RATE": 30,
     "AI_CONFIDENCE_THRESHOLD": 0.6,
-    "AI_MIN_MATCH_COUNT": 9,
+    "AI_MIN_MATCH_COUNT": 20,
     "AI_RANSAC_THRESHOLD": 5.0,
     "AI_SCAN_SIZE": 1200,
     "AI_SCAN_STEP": 800,

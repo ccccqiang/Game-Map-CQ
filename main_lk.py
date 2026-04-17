@@ -195,6 +195,7 @@ class AIMapTrackerApp:
         self.velocity_x = 0  # 速度估计
         self.velocity_y = 0
         self.last_update_time = time.time()  # 上次AI更新时间
+        self.last_ai_result_time = time.time()  # 上次收到AI结果的时间
 
         # --- 使用配置文件中的雷达与追踪参数 ---
         self.scan_size = config.AI_SCAN_SIZE
@@ -266,7 +267,7 @@ class AIMapTrackerApp:
         self.update_tracker()
 
     def ai_inference_loop(self):
-        """AI推理线程：独立运行LoFTR匹配（优化版）"""
+        """AI推理线程：独立运行LoFTR匹配（优化版：多尺度+图像增强）"""
         print("🧠 AI推理线程运行中...")
         
         while self.is_running:
@@ -286,76 +287,22 @@ class AIMapTrackerApp:
                 if local_logic_map.shape[0] < 16 or local_logic_map.shape[1] < 16:
                     continue
                 
-                # 优化1：动态调整图像分辨率（追踪时用小图，扫描时用大图）
-                h, w = local_logic_map.shape[:2]
-                if self.state == "LOCAL_TRACK" and max(h, w) > 400:
-                    # 追踪状态：缩小到400px以内，提速3倍
-                    scale = 400 / max(h, w)
-                    local_logic_map = cv2.resize(local_logic_map, (int(w*scale), int(h*scale)))
-                    scale_factor = 1.0 / scale  # 记录缩放比例用于还原坐标
+                # 多尺度特征融合匹配
+                if config.AI_ENABLE_MULTI_SCALE:
+                    result = self.multi_scale_matching(minimap_bgr, local_logic_map, x1, y1)
                 else:
-                    scale_factor = 1.0
+                    # 原有单尺度匹配逻辑
+                    result = self.single_scale_matching(minimap_bgr, local_logic_map, x1, y1)
                 
-                # 预处理图像
-                tensor_mini = self.preprocess_image(minimap_bgr)
-                tensor_big_local = self.preprocess_image(local_logic_map)
-                
-                input_dict = {"image0": tensor_mini, "image1": tensor_big_local}
-                
-                # AI推理
-                with torch.no_grad():
-                    correspondences = self.matcher(input_dict)
-                
-                mkpts0 = correspondences['keypoints0'].cpu().numpy()
-                mkpts1 = correspondences['keypoints1'].cpu().numpy()
-                confidence = correspondences['confidence'].cpu().numpy()
-                
-                # 优化2：自适应置信度阈值（首次定位宽松，追踪严格）
-                if not self.initial_scan_done:
-                    conf_threshold = 0.2  # 首次定位：极低阈值
-                    min_matches = 3       # 最少3个点
-                elif self.state == "LOCAL_TRACK":
-                    conf_threshold = 0.4  # 追踪：中等阈值
-                    min_matches = 5       # 需要5个点保证精度
-                else:
-                    conf_threshold = config.AI_CONFIDENCE_THRESHOLD
-                    min_matches = config.AI_MIN_MATCH_COUNT
-                
-                # 过滤低置信度匹配点
-                valid_idx = confidence > conf_threshold
-                mkpts0 = mkpts0[valid_idx]
-                mkpts1 = mkpts1[valid_idx]
-                
-                # 计算变换矩阵
-                result = None
-                if len(mkpts0) >= min_matches:
-                    # 优化3：根据状态调整RANSAC参数
-                    ransac_thresh = 3.0 if self.state == "LOCAL_TRACK" else config.AI_RANSAC_THRESHOLD
-                    M, mask = cv2.findHomography(mkpts0, mkpts1, cv2.RANSAC, ransac_thresh)
-                    
-                    if M is not None:
-                        h, w = minimap_bgr.shape[:2]
-                        center_pt = np.float32([[[w / 2, h / 2]]])
-                        dst_center_local = cv2.perspectiveTransform(center_pt, M)
-                        
-                        center_x = int(dst_center_local[0][0][0] * scale_factor + x1)
-                        center_y = int(dst_center_local[0][0][1] * scale_factor + y1)
-                        
-                        if 0 <= center_x < self.map_width and 0 <= center_y < self.map_height:
-                            result = {
-                                'found': True,
-                                'center_x': center_x,
-                                'center_y': center_y,
-                                'match_count': len(mkpts0)
-                            }
-                
+                # 记录AI推理完成时间
                 if result is None:
                     result = {'found': False}
+                result['inference_time'] = time.time()
                 
-                # 将结果放入结果队列（非阻塞）
+                # 将结果放入结果队列（非阻塞，强制覆盖旧结果）
                 try:
                     if self.result_queue.full():
-                        self.result_queue.get_nowait()
+                        self.result_queue.get_nowait()  # 丢弃旧结果
                     self.result_queue.put_nowait(result)
                 except queue.Full:
                     pass
@@ -365,6 +312,184 @@ class AIMapTrackerApp:
                 import traceback
                 traceback.print_exc()
                 time.sleep(0.1)
+    
+    def single_scale_matching(self, minimap_bgr, local_logic_map, x1, y1):
+        """原有单尺度匹配逻辑（保留作为备选）"""
+        # 动态调整图像分辨率
+        h, w = local_logic_map.shape[:2]
+        if self.state == "LOCAL_TRACK" and max(h, w) > 400:
+            scale = 400 / max(h, w)
+            local_logic_map = cv2.resize(local_logic_map, (int(w*scale), int(h*scale)))
+            scale_factor = 1.0 / scale
+        else:
+            scale_factor = 1.0
+        
+        # 预处理图像
+        tensor_mini = self.preprocess_image(minimap_bgr)
+        tensor_big_local = self.preprocess_image(local_logic_map)
+        
+        input_dict = {"image0": tensor_mini, "image1": tensor_big_local}
+        
+        # AI推理
+        with torch.no_grad():
+            correspondences = self.matcher(input_dict)
+        
+        mkpts0 = correspondences['keypoints0'].cpu().numpy()
+        mkpts1 = correspondences['keypoints1'].cpu().numpy()
+        confidence = correspondences['confidence'].cpu().numpy()
+        
+        # 自适应置信度阈值
+        if not self.initial_scan_done:
+            conf_threshold = 0.2
+            min_matches = 3
+        elif self.state == "LOCAL_TRACK":
+            conf_threshold = 0.4
+            min_matches = 5
+        else:
+            conf_threshold = config.AI_CONFIDENCE_THRESHOLD
+            min_matches = config.AI_MIN_MATCH_COUNT
+        
+        # 过滤低置信度匹配点
+        valid_idx = confidence > conf_threshold
+        mkpts0 = mkpts0[valid_idx]
+        mkpts1 = mkpts1[valid_idx]
+        
+        # 计算变换矩阵
+        result = None
+        if len(mkpts0) >= min_matches:
+            ransac_thresh = 3.0 if self.state == "LOCAL_TRACK" else config.AI_RANSAC_THRESHOLD
+            M, mask = cv2.findHomography(mkpts0, mkpts1, cv2.RANSAC, ransac_thresh)
+            
+            if M is not None:
+                h, w = minimap_bgr.shape[:2]
+                center_pt = np.float32([[[w / 2, h / 2]]])
+                dst_center_local = cv2.perspectiveTransform(center_pt, M)
+                
+                center_x = int(dst_center_local[0][0][0] * scale_factor + x1)
+                center_y = int(dst_center_local[0][0][1] * scale_factor + y1)
+                
+                if 0 <= center_x < self.map_width and 0 <= center_y < self.map_height:
+                    result = {
+                        'found': True,
+                        'center_x': center_x,
+                        'center_y': center_y,
+                        'match_count': len(mkpts0)
+                    }
+        
+        if result is None:
+            result = {'found': False}
+        
+        return result
+    
+    def multi_scale_matching(self, minimap_bgr, local_logic_map, x1, y1):
+        """多尺度特征融合匹配（由粗到精策略）"""
+        scales = config.AI_PYRAMID_SCALES
+        strategy = config.AI_PYRAMID_STRATEGY
+        
+        best_result = None
+        best_confidence_sum = 0
+        
+        for scale_idx, scale in enumerate(scales):
+            # 1. 缩放逻辑地图
+            if scale == 1.0:
+                scaled_map = local_logic_map.copy()
+            else:
+                h, w = local_logic_map.shape[:2]
+                new_h, new_w = int(h * scale), int(w * scale)
+                scaled_map = cv2.resize(local_logic_map, (new_w, new_h))
+            
+            # 2. 预处理双图
+            tensor_mini = self.preprocess_image(minimap_bgr)
+            tensor_big = self.preprocess_image(scaled_map)
+            
+            # 3. LoFTR推理
+            input_dict = {"image0": tensor_mini, "image1": tensor_big}
+            with torch.no_grad():
+                correspondences = self.matcher(input_dict)
+            
+            mkpts0 = correspondences['keypoints0'].cpu().numpy()
+            mkpts1 = correspondences['keypoints1'].cpu().numpy()
+            confidence = correspondences['confidence'].cpu().numpy()
+            
+            # 4. 自适应阈值（越精细的尺度要求越高）
+            if not self.initial_scan_done:
+                conf_threshold = 0.2 - scale_idx * 0.05  # 粗尺度更宽松
+                min_matches = 3
+            elif self.state == "LOCAL_TRACK":
+                conf_threshold = 0.4 + scale_idx * 0.05  # 细尺度更严格
+                min_matches = 5 + scale_idx * 2
+            else:
+                conf_threshold = config.AI_CONFIDENCE_THRESHOLD
+                min_matches = config.AI_MIN_MATCH_COUNT
+            
+            # 5. 过滤匹配点
+            valid_idx = confidence > conf_threshold
+            filtered_mkpts0 = mkpts0[valid_idx]
+            filtered_mkpts1 = mkpts1[valid_idx]
+            filtered_conf = confidence[valid_idx]
+            
+            if len(filtered_mkpts0) < min_matches:
+                continue
+            
+            # 6. RANSAC计算单应性矩阵
+            ransac_thresh = 3.0 if self.state == "LOCAL_TRACK" else config.AI_RANSAC_THRESHOLD
+            M, mask = cv2.findHomography(filtered_mkpts0, filtered_mkpts1, cv2.RANSAC, ransac_thresh)
+            
+            if M is None:
+                continue
+            
+            # 7. 计算中心点坐标（还原到原始尺度）
+            h, w = minimap_bgr.shape[:2]
+            center_pt = np.float32([[[w / 2, h / 2]]])
+            dst_center_local = cv2.perspectiveTransform(center_pt, M)
+            
+            # 还原缩放比例
+            inv_scale = 1.0 / scale
+            center_x = int(dst_center_local[0][0][0] * inv_scale + x1)
+            center_y = int(dst_center_local[0][0][1] * inv_scale + y1)
+            
+            # 8. 边界检查
+            if not (0 <= center_x < self.map_width and 0 <= center_y < self.map_height):
+                continue
+            
+            # 9. 计算该尺度的总置信度
+            confidence_sum = np.sum(filtered_conf)
+            
+            if strategy == "coarse_to_fine":
+                # 由粗到精：优先使用最精细尺度的有效结果
+                if scale_idx == len(scales) - 1:  # 最后一个尺度（最精细）
+                    best_result = {
+                        'found': True,
+                        'center_x': center_x,
+                        'center_y': center_y,
+                        'match_count': len(filtered_mkpts0),
+                        'scale_used': scale
+                    }
+                    break  # 找到最精细的有效结果就退出
+                else:
+                    # 暂存当前结果，继续尝试更精细的尺度
+                    best_result = {
+                        'found': True,
+                        'center_x': center_x,
+                        'center_y': center_y,
+                        'match_count': len(filtered_mkpts0),
+                        'scale_used': scale
+                    }
+            
+            elif strategy == "weighted":
+                # 加权融合：选择置信度最高的结果
+                if confidence_sum > best_confidence_sum:
+                    best_confidence_sum = confidence_sum
+                    best_result = {
+                        'found': True,
+                        'center_x': center_x,
+                        'center_y': center_y,
+                        'match_count': len(filtered_mkpts0),
+                        'scale_used': scale,
+                        'confidence_sum': confidence_sum
+                    }
+        
+        return best_result if best_result else {'found': False}
     
     def load_available_routes(self):
         """加载所有可用的路线文件"""
@@ -572,13 +697,38 @@ class AIMapTrackerApp:
             self.route_status_label.config(text="未加载路线", fg='yellow')
 
     def preprocess_image(self, img_bgr):
-        """预处理图像"""
+        """增强版图像预处理：CLAHE + 高斯模糊 + 边缘增强"""
+        # 1. 转换为灰度图
         img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        
+        # 2. CLAHE自适应直方图均衡化（增强对比度）
+        if config.AI_ENABLE_CLAHE:
+            clahe = cv2.createCLAHE(
+                clipLimit=config.AI_CLAHE_CLIP_LIMIT,
+                tileGridSize=(config.AI_CLAHE_GRID_SIZE, config.AI_CLAHE_GRID_SIZE)
+            )
+            img_gray = clahe.apply(img_gray)
+        
+        # 3. 高斯模糊降噪
+        if config.AI_ENABLE_GAUSSIAN_BLUR:
+            kernel_size = config.AI_GAUSSIAN_KERNEL_SIZE
+            sigma = config.AI_GAUSSIAN_SIGMA
+            img_gray = cv2.GaussianBlur(img_gray, (kernel_size, kernel_size), sigma)
+        
+        # 4. 边缘增强（可选，实验性功能）
+        if config.AI_ENABLE_EDGE_ENHANCE:
+            # 使用Unsharp Masking锐化
+            blurred = cv2.GaussianBlur(img_gray, (0, 0), 3)
+            img_gray = cv2.addWeighted(img_gray, 1.5, blurred, -0.5, 0)
+        
+        # 5. 调整尺寸为8的倍数（LoFTR要求）
         h, w = img_gray.shape
         new_h = h - (h % 8)
         new_w = w - (w % 8)
         if new_h != h or new_w != w:
             img_gray = cv2.resize(img_gray, (new_w, new_h))
+        
+        # 6. 转换为Tensor
         tensor = K.image_to_tensor(img_gray, False).float() / 255.0
         return tensor.to(self.device)
 
@@ -632,9 +782,14 @@ class AIMapTrackerApp:
             y2 = min(self.map_height, self.last_y + self.search_radius)
         
         # 2. 将帧数据发送到AI线程（非阻塞）
+        # 关键优化：丢弃旧帧，保证AI始终处理最新画面
         try:
             if self.frame_queue.full():
-                self.frame_queue.get_nowait()
+                # 队列满了说明AI处理不过来，丢弃最旧的帧
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
             self.frame_queue.put_nowait((minimap_bgr, (x1, y1, x2, y2)))
         except queue.Full:
             pass
@@ -643,6 +798,7 @@ class AIMapTrackerApp:
         try:
             ai_result = self.result_queue.get_nowait()
             self.last_ai_result = ai_result
+            self.last_ai_result_time = time.time()  # 更新收到结果的时间
         except queue.Empty:
             ai_result = self.last_ai_result
         
@@ -651,6 +807,13 @@ class AIMapTrackerApp:
             found = True
             center_x = ai_result['center_x']
             center_y = ai_result['center_y']
+            
+            # 性能监控：计算AI推理延迟
+            inference_time = ai_result.get('inference_time', 0)
+            if inference_time > 0:
+                latency = (time.time() - inference_time) * 1000  # 毫秒
+                if latency > 200:  # 超过200ms打印警告
+                    print(f"⚠️ AI推理延迟高: {latency:.0f}ms, 匹配点: {ai_result.get('match_count', 0)}")
             
             # 标记首次定位完成
             if not self.initial_scan_done:
@@ -701,11 +864,17 @@ class AIMapTrackerApp:
             # === 惯性导航：没有AI结果时使用预测位置 ===
             if self.state == "LOCAL_TRACK":
                 current_time = time.time()
-                dt = current_time - self.last_update_time
                 
-                # 如果超过500ms没有AI更新，才认为是真正丢失
-                if dt < 0.5 and self.inertial_x is not None:
+                # 关键修复：使用last_ai_result_time判断，而非last_update_time
+                # last_ai_result_time是收到任何AI结果（包括found=False）的时间
+                # last_update_time是成功定位的时间
+                time_since_last_ai = current_time - self.last_ai_result_time
+                time_since_last_success = current_time - self.last_update_time
+                
+                # 如果AI线程还在运行（1秒内有响应），即使没找到也继续用惯性导航
+                if time_since_last_ai < 1.0 and self.inertial_x is not None:
                     # 使用惯性预测位置
+                    dt = time_since_last_success  # 距离上次成功定位的时间
                     predicted_x = self.inertial_x + self.velocity_x * dt
                     predicted_y = self.inertial_y + self.velocity_y * dt
                     
@@ -731,7 +900,7 @@ class AIMapTrackerApp:
                     if self.route_planning_enabled and self.current_route:
                         self.draw_route_on_display(display_crop, vx1, vy1, int(predicted_x), int(predicted_y))
                 else:
-                    # 真正丢失：超过500ms没有AI结果或惯性未初始化
+                    # 真正丢失：AI线程超过1秒无响应或惯性未初始化
                     self.lost_frames += 1
                     if self.lost_frames <= self.max_lost_frames:
                         vy1 = max(0, self.last_y - half_view)
@@ -744,7 +913,7 @@ class AIMapTrackerApp:
                         local_cy = self.last_y - vy1
                         cv2.circle(display_crop, (local_cx, local_cy), radius=10, color=(0, 255, 255), thickness=-1)
                     else:
-                        print("彻底丢失目标，启动全局雷达扫描...")
+                        print(f"⚠️ 彻底丢失目标（AI超时{time_since_last_ai:.1f}s），启动全局雷达扫描...")
                         self.state = "GLOBAL_SCAN"
                         self.scan_x = 0
                         self.scan_y = 0
